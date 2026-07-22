@@ -350,9 +350,6 @@ def build_html(hk):
   .box{display:flex;align-items:baseline;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 12px;white-space:nowrap}
   .num{font-size:13px;font-weight:700;color:var(--brand2)}
   .lab{font-size:13px;color:var(--sub)}
-  .marketsel{display:flex;gap:8px;margin:14px 0 2px;flex-wrap:wrap}
-  .mkt{padding:7px 22px;border:1px solid var(--line);border-radius:999px;background:var(--card);cursor:pointer;font-size:14px;font-weight:700;color:var(--sub);line-height:1.2;white-space:nowrap}
-  .mkt.active{background:var(--brand);color:#fff;border-color:var(--brand)}
   .tabs{display:flex;gap:8px;margin:14px 0 8px}
   .tab{padding:7px 20px;display:flex;flex-direction:column;align-items:center;gap:1px;border:1px solid var(--line);border-radius:999px;background:var(--card);cursor:pointer;font-size:14px;font-weight:600;color:var(--sub);line-height:1.2}
   .tab-main{white-space:nowrap}
@@ -405,10 +402,6 @@ def build_html(hk):
       </div>
     </div>
   </header>
-
-  <div class="marketsel" id="marketsel">
-    <div class="mkt active" data-mkt="hk">港股</div>
-  </div>
 
   <div class="capsel" id="capsel">
     <div class="cap active" data-cap="gt1000">市值 &gt; 1000亿港元</div>
