@@ -144,17 +144,27 @@ def parse_date(s):
     except:
         return None
 
-def run_div(code, retries=3):
+def run_div(code, force=False, retries=6):
+    """取分红历史。
+    force=True 表示行情已显示有股息率（几乎肯定派息）——此时若接口返回'暂无'，
+    大概率是限流/偶发失败，按退避策略重试；空页/超时同样重试。
+    force=False（行情无股息率）则首次见到'暂无'即判定为真的不派息，直接返回 None。
+    """
+    backoff = 0.4
     for _ in range(retries):
         try:
             out = subprocess.run([NODE, DATA_JS, "dividend", "list", code, "--years", "5"],
                                  capture_output=True, text=True, timeout=60).stdout
-            if "暂无分红数据" in out or "暂无" in out:
-                return None
-            if "reportEndDate" in out or "exDivDate" in out:
-                return out
         except Exception:
-            time.sleep(0.3)
+            time.sleep(backoff); backoff = min(backoff * 2, 4); continue
+        if "reportEndDate" in out or "exDivDate" in out:
+            return out
+        if "暂无分红数据" in out or "暂无" in out:
+            if not force:
+                return None
+            time.sleep(backoff); backoff = min(backoff * 2, 4); continue
+        # 既无分红行也无明确'暂无'：可能是空页/接口抖动，重试
+        time.sleep(backoff); backoff = min(backoff * 2, 4)
     return None
 
 def parse_hk_div(txt):
@@ -200,7 +210,9 @@ def full_year_dps(rows):
 def fetch_hk_div(quotes):
     def work(q):
         code = q["code"]
-        txt = run_div(code)
+        # 行情已显示股息率>0 的，几乎必然派息；对'暂无'强制重试，规避限流假阴性
+        force = (q.get("ttm_yield") or 0) > 0
+        txt = run_div(code, force=force)
         rec = {
             "code": code, "name": q["name"], "price": q.get("price"),
             "mv_hkd": q.get("mv"), "ttm_yield": q.get("ttm_yield"),
@@ -239,7 +251,7 @@ def fetch_hk_div(quotes):
                 rec[k] = None
         return rec
     result = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         for i, rec in enumerate(ex.map(work, quotes), 1):
             result.append(rec)
             if i % 60 == 0:
