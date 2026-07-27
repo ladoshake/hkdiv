@@ -59,6 +59,20 @@
     .tabs{gap:6px}
     .tab{padding:8px 12px;font-size:clamp(12px,3.4vw,14px)}
     .wrap{padding:12px 12px 48px}
+    /* 冻结首两列（排名、名称）：横向滑动时不动 */
+    table{border-collapse:separate;border-spacing:0;overflow:visible}
+    th:nth-child(1),td:nth-child(1),
+    th:nth-child(2),td:nth-child(2){position:sticky}
+    th:nth-child(1),td:nth-child(1){left:0;width:46px;min-width:46px;max-width:46px;background:#fff;z-index:2}
+    th:nth-child(2),td:nth-child(2){
+      left:46px;background:#fff;z-index:2;
+      box-shadow:2px 0 4px -2px rgba(15,23,42,.22)  /* 冻结分隔阴影 */
+    }
+    th:nth-child(1),th:nth-child(2){background:#f0f1f4;z-index:3}
+    tbody tr:nth-child(even) td:nth-child(1),
+    tbody tr:nth-child(even) td:nth-child(2){background:#f7f8fa}
+    tbody tr:hover td:nth-child(1),
+    tbody tr:hover td:nth-child(2){background:#e8f0fe}
   }
 </style>
 </head>
