@@ -5,13 +5,33 @@
 流程：取代码宇宙 -> 批量 quote(真实市值/股息率TTM) -> 批量分红历史 -> 分市值档 Top30 -> 写 HTML
 数据来源：腾讯自选股（westock-data skill 的行情/分红接口）
 """
-import subprocess, json, re, os, sys, time, datetime
+import subprocess, json, re, os, sys, time, datetime, glob, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # ---------------- 环境常量（绝对路径，避免依赖环境变量） ----------------
 NODE = "/Users/green/.workbuddy/binaries/node/versions/22.22.2/bin/node"
-DATA_JS = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-skills/westock-data/scripts/index.js"
-TOOL_JS = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-skills/westock-tool/scripts/index.js"
+
+def resolve_westock_bin():
+    """定位 westock-data CLI。
+    旧的 app 内置脚本（builtin-skills/westock-data/scripts/index.js）在 WorkBuddy
+    升级后已消失；现在该 skill 以 npm 包 westock-data-skillhub 分发。
+    优先用 npx 缓存里的 index.js，找不到则回退到 npx 直跑。
+    """
+    legacy = ("/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked"
+              "/resources/builtin-skills/westock-data/scripts/index.js")
+    if os.path.exists(legacy):
+        return [NODE, legacy]
+    cands = sorted(glob.glob(os.path.expanduser(
+        "~/.npm/_npx/*/node_modules/westock-data-skillhub/index.js")))
+    if cands:
+        return [NODE, cands[-1]]
+    return ["npx", "-y", "westock-data-skillhub@1.0.5"]
+
+DATA_CMD = resolve_westock_bin()
+
+# 腾讯 gtimg 行情端点（替代已失效的 westock-tool filter / westock-data quote）
+GTIMG = "https://qt.gtimg.cn/q="
+UA = {"User-Agent": "Mozilla/5.0"}
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
@@ -34,27 +54,65 @@ def log(*a):
 # =====================================================================
 # 1) 代码宇宙
 # =====================================================================
-def run_filter(market, limit):
-    out = subprocess.run(
-        [NODE, TOOL_JS, "filter", "intersect([TotalMV > 0])",
-         "--market", market, "--orderby", "TotalMV", "--desc", "--limit", str(limit)],
-        capture_output=True, text=True, timeout=180)
-    return out.stdout
+def gtimg_batch(codes, retries=3):
+    """取一批代码的 gtimg 行情原文（GBK 解码，务必不要用 UTF-8）。"""
+    backoff = 0.4
+    for _ in range(retries):
+        try:
+            req = urllib.request.Request(GTIMG + ",".join(codes), headers=UA)
+            return urllib.request.urlopen(req, timeout=30).read().decode("gbk", "ignore")
+        except Exception:
+            time.sleep(backoff); backoff = min(backoff * 2, 4)
+    return ""
+
+def parse_gtimg(txt):
+    """解析 gtimg ~分隔行情。港股字段：
+       f[1]=名称 f[2]=代码 f[3]=现价 f[45]=总市值(亿港元) f[47]=股息率TTM(%) f[63]=品种类型
+       与旧 quote 接口口径一致（市值单位亿港元、股息率取官方 TTM 字段）。"""
+    out = {}
+    for line in txt.strip().split(";"):
+        if "=" not in line:
+            continue
+        f = line.split("=", 1)[1].strip().strip('"').split("~")
+        if len(f) < 73 or not f[1] or not f[2]:
+            continue
+        def num(i):
+            try:
+                v = float(f[i]);  return v
+            except:
+                return None
+        px, mv = num(3), num(45)
+        if not px or px <= 0 or mv is None:
+            continue
+        name = f[1] if f[1] != f[2] else (f[46].strip() or f[2])
+        out["hk" + f[2]] = {"code": "hk" + f[2], "name": name, "price": px,
+                            "ttm_yield": num(47), "mv": mv, "kind": f[63]}
+    return out
+
+def scan_hk_market():
+    """全代码段扫描港股（00001-09999），返回 code -> 行情记录。
+    替代已失效的 westock-tool filter：gtimg 支持 60 代码/请求，全市场约 5s。
+    """
+    codes = ["hk%05d" % i for i in range(1, 10000)]
+    groups = [codes[i:i + 60] for i in range(0, len(codes), 60)]
+    res = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for txt in ex.map(gtimg_batch, groups):
+            res.update(parse_gtimg(txt))
+    return res
 
 def get_hk_universe():
-    txt = run_filter("hk", 2500)
+    quotes = scan_hk_market()
     rows = []
-    for l in txt.splitlines():
-        if "| hk" not in l:
+    for code, q in quotes.items():
+        # 排除 ETF/基金（GP-FUND），保留房托 GP-FUND-REITS（如 领展房产基金）
+        kind = q.get("kind") or ""
+        if kind.startswith("GP-FUND") and "REITS" not in kind:
             continue
-        cols = [c.strip() for c in l.strip().strip("|").split("|")]
-        if len(cols) < 4:
+        # 排除美股代币化挂牌（名称以 -T 结尾，如 微软-T / 思科-T，市值为美股全球市值）
+        if q["name"].endswith("-T"):
             continue
-        try:
-            mv = float(cols[2])
-        except:
-            continue
-        rows.append((cols[0], cols[1], mv))
+        rows.append((code, q["name"], q["mv"]))
     # 仅保留 >500亿港元（覆盖两档：>1000 / 500-1000）
     THRESH = 500
     rows = [r for r in rows if r[2] > THRESH]
@@ -74,61 +132,18 @@ def get_hk_universe():
 # =====================================================================
 # 2) 批量行情 quote
 # =====================================================================
-def run_quote(codes):
-    out = subprocess.run([NODE, DATA_JS, "quote", ",".join(codes)],
-                         capture_output=True, text=True, timeout=120)
-    return out.stdout
-
-def parse_quotes_generic(text, market):
-    """按列名解析 quote 输出。港股 mv 单位亿港元。"""
-    lines = text.splitlines()
-    hidx = None
-    for i, l in enumerate(lines):
-        if "code" in l and "name" in l and "total_market_cap" in l and "|" in l:
-            hidx = i
-            break
-    if hidx is None:
-        return {}
-    header = [c.strip() for c in lines[hidx].strip().strip("|").split("|")]
-    if header and header[0] == "":
-        header = header[1:]
-    idx = {h: j for j, h in enumerate(header)}
-    prefix = "hk"
-    res = {}
-    p_idx, d_idx, m_idx = idx["price"], idx["dividend_ratio_ttm"], idx["total_market_cap"]
-    for l in lines[hidx + 1:]:
-        s = l.strip().strip("|").strip()
-        if not s or not s.startswith(prefix):
-            continue
-        cols = [c.strip() for c in s.split("|")]
-        if len(cols) <= m_idx:
-            continue
-        code = cols[idx["code"]]
-        if not code.startswith(prefix):
-            continue
-        def num(x):
-            try:
-                return float(x) if x not in ("", "-") else None
-            except:
-                return None
-        res[code] = {
-            "code": code, "name": cols[idx["name"]],
-            "price": num(cols[p_idx]), "ttm_yield": num(cols[d_idx]), "mv": num(cols[m_idx]),
-        }
-    return res
-
 def fetch_quotes(codes, market):
+    """批量取行情（gtimg，60 代码/请求）。输出结构与旧 quote 解析一致：
+       {code, name, price, ttm_yield, mv(亿港元)}。"""
     out = {}
-    for i in range(0, len(codes), 50):
-        batch = codes[i:i + 50]
+    for i in range(0, len(codes), 60):
+        batch = codes[i:i + 60]
         try:
-            txt = run_quote(batch)
-            parsed = parse_quotes_generic(txt, market)
-            out.update(parsed)
+            out.update(parse_gtimg(gtimg_batch(batch)))
         except Exception as e:
             log(f"  quote batch {i} error: {e}")
-        if i % 200 == 0:
-            log(f"  quote {min(i+50,len(codes))}/{len(codes)} parsed={len(out)}")
+        if i % 180 == 0:
+            log(f"  quote {min(i+60,len(codes))}/{len(codes)} parsed={len(out)}")
     log(f"{market} quotes parsed: {len(out)}")
     return out
 
@@ -153,7 +168,7 @@ def run_div(code, force=False, retries=6):
     backoff = 0.4
     for _ in range(retries):
         try:
-            out = subprocess.run([NODE, DATA_JS, "dividend", "list", code, "--years", "5"],
+            out = subprocess.run(DATA_CMD + ["dividend", "list", code, "--years", "5"],
                                  capture_output=True, text=True, timeout=60).stdout
         except Exception:
             time.sleep(backoff); backoff = min(backoff * 2, 4); continue
